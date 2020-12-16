@@ -10,17 +10,32 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onCommand:aemu.launch"
+		"onCommand:aemu.connect"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [
 			{
-				"command": "aemu.launch",
-				"title": "Launch Emulator",
+				"command": "aemu.connect",
+				"title": "Connect to Android Emulator",
 				"category": "Android Emulator"
 			}
-		]
+		],
+		"configuration": {
+			"title": "Android Embedded Emulator",
+			"properties": {
+				"avd": {
+					"type": "string",
+					"default": "",
+					"description": "AVD to launch"
+				},
+				"emulatorPath": {
+					"type": "string",
+					"default": "~/Library/Android/sdk/emulator/emulator",
+					"description": "absolute path of the `emulator` tool"
+				}
+			}
+		}
 	},
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
@@ -31,13 +46,14 @@
 		"test": "node ./out/test/runTest.js"
 	},
 	"devDependencies": {
-		"@types/vscode": "^1.52.0",
 		"@types/glob": "^7.1.3",
+		"@types/ini": "^1.3.30",
 		"@types/mocha": "^8.0.4",
 		"@types/node": "^12.11.7",
-		"eslint": "^7.15.0",
+		"@types/vscode": "^1.52.0",
 		"@typescript-eslint/eslint-plugin": "^4.9.0",
 		"@typescript-eslint/parser": "^4.9.0",
+		"eslint": "^7.15.0",
 		"glob": "^7.1.6",
 		"mocha": "^8.1.3",
 		"typescript": "^4.1.2",
@@ -45,7 +61,10 @@
 	},
 	"dependencies": {
 		"@grpc/grpc-js": "^1.2.2",
+		"@types/chokidar": "^2.1.3",
 		"@types/google-protobuf": "^3.7.4",
-		"google-protobuf": "^3.14.0"
+		"chokidar": "^3.4.3",
+		"google-protobuf": "^3.14.0",
+		"ini": "^2.0.0"
 	}
 }

@@ -1,4 +1,5 @@
 import * as grpc from "@grpc/grpc-js";
+import { config } from "./config";
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as emu from "./proto/emulator_controller_grpc_pb";
@@ -11,24 +12,61 @@ import {
   MouseEvent as MouseEvt,
 } from "./proto/emulator_controller_pb";
 import * as path from "path";
+import * as cp from "child_process";
+import { EmulatorDiscovery } from "./discovery";
 
+function exec(
+  command: string,
+  options: cp.ExecOptions = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    cp.exec(command, options, (error, stdout, stderr) => {
+      if (error) {
+        reject({ error, stdout, stderr });
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+// A visible embedded emulator. This component interacts with a running emulator over gRPC.
+// It will register to retrieve screenshots that are delivered over a file side channel.
+// Every frame will be written to a file and the emulator will notify this object that
+// a new frame is available.
+//
+// Frames are marshalled across the security boundary by encoding them to base64 and sending
+// a json message to the Webview. The webview is repsonsible for posting a message after rendering
+// to notify this object that it can render another frame. Frames that are delivered in the meantime will be dropped.
+//
+// Emulators are discovered by looking for an emulator discovery file. If none exists the plugin will wait until
+// one becomes available.
 export class Emulator {
-  client: emu.EmulatorControllerClient;
+  // Emulator connection information.
+  client: emu.EmulatorControllerClient | undefined;
+
+  // pid of the emulator process.
+  pid: string | undefined;
+
+  // Metadata that *must* be passed to the gRPC call (likely has token)
+  metadata: grpc.Metadata | undefined;
 
   // Current mouse state.
   mouse: { x: number; y: number; mousedown: boolean; button: number };
 
-  // Width & Height of the canvas.
+  // Width & Height of the canvas, this is the rendered emulator frame.
   width: number;
   height: number;
 
-  // Width & Height of the device.
+  // Width & Height of the avd.
   deviceWidth: number;
   deviceHeight: number;
 
   // File where the emulator writes the RGB888 file. mmap on the emulator side
   tmpfile: vscode.Uri;
+
+  // Webview that renders and provides mouse/keyboard events.
   panel: vscode.WebviewPanel;
+
   context: vscode.ExtensionContext;
 
   // True if the hosted webview can handle another frame
@@ -36,12 +74,9 @@ export class Emulator {
   wantsResize: boolean;
 
   stream: grpc.ClientReadableStream<Image> | null;
+  discovery: EmulatorDiscovery;
 
   constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
-    this.client = new emu.EmulatorControllerClient(
-      "localhost:8554",
-      grpc.credentials.createInsecure()
-    );
     // TODO(jansene): Make variable.
 
     this.deviceHeight = 1920;
@@ -58,12 +93,36 @@ export class Emulator {
     this.stream = null;
     this.wantsFrame = true;
     this.wantsResize = false;
-
+    this.discovery = new EmulatorDiscovery();
     this.addListeners();
-    this.deviceStatus();
-    this.streamScreenshot();
+
+    if (this.discovery.size() > 0) {
+      this.connect(this.discovery.getFirstClient()!);
+    } else {
+      vscode.window.showInformationMessage("Waiting for emulator.");
+      this.discovery.watch(this);
+    }
   }
 
+  // Connect to a running emulator with the given pid and client.
+  connect(emulator: {
+    pid: string;
+    client: emu.EmulatorControllerClient;
+    metadata: grpc.Metadata;
+  }) {
+    this.pid = emulator.pid;
+    this.client = emulator.client;
+    this.metadata = emulator.metadata;
+
+    vscode.window.showInformationMessage(
+      `Connecting to emulator with pid: ${this.pid}`
+    );
+    this.deviceStatus();
+    this.streamScreenshot();
+    this.reveal();
+  }
+
+  // Activates the window.
   reveal() {
     const columnToShowIn = vscode.window.activeTextEditor
       ? vscode.window.activeTextEditor.viewColumn
@@ -109,7 +168,7 @@ export class Emulator {
     request.setY(y);
     request.setButtons(this.mouse.mousedown ? this.mouse.button : 0);
 
-    this.client.sendMouse(request, (err) => {
+    this.client!.sendMouse(request, this.metadata!, (err) => {
       if (err) {
         console.log(
           "Failed to deliver " +
@@ -119,6 +178,12 @@ export class Emulator {
         );
       }
     });
+  }
+
+  async launch(avd: string) {
+    return exec(
+      `${config.emulatorPath} -avd ${avd} -netdelay none -netspeed full -qt-hide-window -grpc-use-token -idle-grpc-timeout 300 &`
+    );
   }
 
   sendKey(eventType: string, key: string) {
@@ -131,7 +196,7 @@ export class Emulator {
         : KeyboardEvent.KeyEventType.KEYPRESS
     );
     request.setKey(key);
-    this.client.sendKey(request, (err) => {
+    this.client!.sendKey(request, this.metadata!, (err) => {
       if (err) {
         console.log(
           "Failed to deliver " +
@@ -144,7 +209,7 @@ export class Emulator {
   }
   // Retrieves the device status, we use this to get the device width & height.
   deviceStatus() {
-    this.client.getStatus(new Empty(), (err, response) => {
+    this.client!.getStatus(new Empty(), this.metadata!, (err, response) => {
       var hwConfig = new Map<string, string>();
       const entryList = response.getHardwareconfig()!.getEntryList();
       for (var i = 0; i < entryList.length; i++) {
@@ -215,6 +280,7 @@ export class Emulator {
   }
 
   streamScreenshot() {
+    this.panel.webview.postMessage({ command: "enable" });
     let transport = new ImageTransport();
     transport.setChannel(ImageTransport.TransportChannel.MMAP);
     transport.setHandle(this.tmpfile.toString());
@@ -226,9 +292,10 @@ export class Emulator {
     fmt.setTransport(transport);
 
     // Clear out the file.
+    fs.openSync(this.tmpfile.fsPath, "w");
     fs.truncateSync(this.tmpfile.fsPath, this.height * this.width * 3);
 
-    this.stream = this.client.streamScreenshot(fmt);
+    this.stream = this.client!.streamScreenshot(fmt, this.metadata!);
     this.stream.on("data", (img: Image) => {
       const format = img.getFormat()!;
       // Make sure we properly translate mouse clicks.
@@ -241,6 +308,7 @@ export class Emulator {
           encoding: "base64",
         });
         let data = {
+          command: "frame",
           img: contents,
           width: format.getWidth(),
           height: format.getHeight(),
@@ -249,20 +317,37 @@ export class Emulator {
       }
     });
 
-    this.stream.on("error", (err: Error) => {
+    this.stream.on("error", (err: any) => {
       // We cancel the stream on resize, so lets restart it!
       console.log("Error from screenshot: " + err.message);
-      if (this.wantsResize) {
-        this.wantsResize = false;
-        this.streamScreenshot();
-      } else {
-        console.log("Error from screenshot: " + JSON.stringify(err));
+      switch (err.code) {
+        case 1:
+          if (this.wantsResize) {
+            this.wantsResize = false;
+            this.streamScreenshot();
+          }
+          break;
+        case 13:
+          this.close();
+          break;
+        default:
+          console.log("Error from screenshot: " + JSON.stringify(err));
       }
     });
   }
 
   close() {
-    this.client.close();
-    this.client.getChannel().close();
+    vscode.window.showInformationMessage(
+      `Emulator connection to ${this.pid} closed.`
+    );
+    this.client?.close();
+    this.client?.getChannel().close();
+    let data = {
+      command: "frame",
+      img: "",
+      width: 0,
+      height: 0,
+    };
+    this.panel.webview.postMessage(data);
   }
 }
