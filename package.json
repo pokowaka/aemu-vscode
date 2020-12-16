@@ -10,13 +10,13 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onCommand:aemu.helloWorld"
+		"onCommand:aemu.launch"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [
 			{
-				"command": "aemu.helloWorld",
+				"command": "aemu.launch",
 				"title": "Launch Emulator",
 				"category": "Android Emulator"
 			}
