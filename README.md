@@ -1,7 +1,6 @@
-# aemu README
-Visual studio code plugin to connect to embedded android emulator
+# aemu-vscode README
+Visual studio code plugin to connect to embedded android emulator. This does not launch the emulator, but will visualize any running emulator in a toolwindow.
 
-This is the README for your extension "aemu". After writing up a brief description, we recommend including the following sections.
 
 ## Features
 
